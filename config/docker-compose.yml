@@ -1,0 +1,116 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN} --protocol http2
+
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: chatwoot_production
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chatwoot:
+    image: chatwoot/chatwoot:latest
+    container_name: chatwoot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      INSTALLATION_ENV: docker
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE}
+      FRONTEND_URL: https://chat.${DOMAIN}
+      RAILS_ENV: production
+      DATABASE_URL: postgresql://postgres:${CHATWOOT_DB_PASSWORD}@postgres:5432/chatwoot_production
+      REDIS_URL: redis://redis:6379
+      MAILER_SENDER_EMAIL: support@${DOMAIN}
+      SMTP_ADDRESS: ${EMAIL}
+      SMTP_PORT: 465
+      SMTP_USERNAME: support@${DOMAIN}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_AUTHENTICATION: login
+      SMTP_ENABLE_STARTTLS_AUTO: "false"
+      SMTP_TLS: "true"
+    volumes:
+      - chatwoot_storage:/app/storage
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+
+  chatwoot-worker:
+    image: chatwoot/chatwoot:latest
+    container_name: chatwoot-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      INSTALLATION_ENV: docker
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE}
+      FRONTEND_URL: https://chat.${DOMAIN}
+      RAILS_ENV: production
+      DATABASE_URL: postgresql://postgres:${CHATWOOT_DB_PASSWORD}@postgres:5432/chatwoot_production
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - chatwoot_storage:/app/storage
+    command: bundle exec sidekiq -C config/sidekiq.yml
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: admin
+      N8N_BASIC_AUTH_PASSWORD: follow01
+      WEBHOOK_URL: https://n8n.${DOMAIN}
+      GENERIC_TIMEZONE: America/New_York
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  chatwoot_storage:
+  n8n_data:
+  qdrant_data:
