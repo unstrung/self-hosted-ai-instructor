@@ -1,0 +1,351 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chatwoot-webhook",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -640,
+        224
+      ],
+      "id": "a5446f6b-8f6b-4aca-b1f9-191444dcceed",
+      "name": "Webhook",
+      "webhookId": "352d3036-6b5e-40ff-8607-9150ab1d444f"
+    },
+    {
+      "parameters": {
+        "jsCode": "let output = [];\n\n// Access n8n's static workflow memory\nconst workflowStaticData = $getWorkflowStaticData('global');\nif (!workflowStaticData.recentConversations) {\n  workflowStaticData.recentConversations = {};\n}\n\nconst now = Date.now();\n\nfor (let item of $input.all()) {\n  const data = item.json.body || item.json;\n\n  // 1. Loop prevention check\n  if (data.message_type === 'outgoing' || data.message_type === 1) {\n    continue; \n  }\n\n  // 2. Safely extract identifiers first\n  const accountId = data.account?.id || data.account_id;\n  const conversationId = data.conversation?.id || data.conversation_id || data.id;\n\n  // 3. DEDUPLICATION LOCK\n  // If we have processed this specific conversation ID in the last 5 seconds, drop this duplicate execution\n  if (conversationId) {\n    const lastProcessedTime = workflowStaticData.recentConversations[conversationId];\n    if (lastProcessedTime && (now - lastProcessedTime < 5000)) {\n      continue; // Kill the duplicate execution right here\n    }\n    // Mark this ID as processed with the current timestamp\n    workflowStaticData.recentConversations[conversationId] = now;\n  }\n\n  // 4. Extract content safely\n  let rawContent = data.content || \"\";\n  if (data.messages && data.messages.length > 0) {\n    rawContent = data.messages[0].content || \"\";\n  }\n\n  // 5. Email form cleaning\n  if (rawContent.includes(\"Message Body:\")) {\n    let parts = rawContent.split(\"Message Body:\");\n    let textAfterBody = parts[1] || \"\";\n    let cleanQuestion = textAfterBody.split(\"--\")[0];\n    rawContent = cleanQuestion.trim();\n  }\n\n  // Map values downstream\n  item.json.question = rawContent;\n  item.json.accountId = accountId;\n  item.json.conversationId = conversationId;\n\n  output.push(item);\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        -80
+      ],
+      "id": "ea7accdd-5315-4b9f-af39-b4c889c54e7f",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.question }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -384,
+        80
+      ],
+      "id": "e63dde5d-04cf-4fea-a3c9-14cf556b07bd",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "wk1vO7dAyRMxtjVA",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const embeddingData = $input.first().json;\nconst originalData = $('Code in JavaScript').item.json;\n\n// Construct the exact structure needed by your Qdrant query body parameter\nconst qdrantBody = {\n  vector: embeddingData.data[0].embedding,\n  limit: 3,\n  with_payload: true\n};\n\nreturn [{\n  json: {\n    qdrantBody: qdrantBody,\n    question: originalData.question,\n    conversationId: originalData.conversationId,\n    accountId: originalData.accountId\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        -80
+      ],
+      "id": "a3604b01-ad9e-4afb-8ba0-e66db8b5f792",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://qdrant:6333/collections/guitar_kb/points/query",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": " application/json",
+        "body": "= {{ JSON.stringify($json.qdrantBody) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -144,
+        64
+      ],
+      "id": "aeaf5f4f-6d6a-4677-8665-5430cf4ba766",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = JSON.stringify($input.first().json);\nconst parsed = JSON.parse(raw);\n\n// FIX: define where your context actually comes from\nconst context = parsed.result.context;   // <-- adjust this if needed\n\nconst node4 = $('Code in JavaScript1').item.json;\n\nconst prompt = `\nYou are Six String Stevie — a friendly, knowledgeable guitar‑theory mentor with a relaxed musician vibe.\nYour job is to answer the user’s guitar‑theory question using the provided context first.\n\nIf the context does not contain the answer, briefly say so, then answer using your own reliable knowledge of guitar theory, fretboard logic, technique, and basic gear concepts.\n\nPERSONALITY & VOICE:\n- Sound like an experienced guitarist who loves teaching.\n- Be warm, encouraging, and practical — never robotic.\n- Use simple, accurate terminology (intervals, scales, chord tones, fretboard positions).\n\nOUTPUT RULES:\n- Keep explanations concise and focused.\n- Give short examples when they help (e.g., \"In A minor, that would be A–C–E\").\n- Never invent fake citations, fake songs, or fake “official” terminology.\n- If a question references a term, organization, formula, or concept you do not recognize and cannot verify, say so directly — e.g., \"I'm not familiar with that term — it may not be a standard guitar theory concept. Could you share where you came across it?\" Never stay silent or skip a response.\n- If you’re unsure, say so honestly and give the closest accurate explanation.\n- Always end with a friendly sign‑off like: \"Thanks for asking, keep on rockin'!\"\n\nDOMAIN BOUNDARIES:\n- Stay strictly within guitar theory, technique, fretboard knowledge, and basic gear.\n- Do NOT answer unrelated topics (math, politics, medicine, etc.).\n- If asked something outside your domain, say you can’t help with that and gently redirect to guitar topics.\n\nNow answer the user’s question.\n\nContext:\n${context}\n\nQuestion:\n${node4.question}\n\nAnswer:\n`;\n\nreturn [{\n  json: {\n    question: node4.question,\n    conversationId: node4.conversationId,\n    accountId: node4.accountId,\n    prompt: prompt\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -96
+      ],
+      "id": "bcb4fe50-6741-4a3d-a459-3ee16806c1ea",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": " https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "gpt-4o-mini"
+            },
+            {
+              "name": "messages",
+              "value": "={{ [{\"role\": \"user\", \"content\": $json.prompt}] }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        192,
+        -32
+      ],
+      "id": "477b286d-db98-4f0a-b07e-3863e8abb7c5",
+      "name": "HTTP Request2",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "wk1vO7dAyRMxtjVA",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = JSON.stringify($input.first().json);\nconst match = raw.match(/\\\"content\\\":\\\"(.*?)\\\",\\\"refusal\\\"/);\nconst answer = match ? match[1] : \"Sorry, I could not generate an answer.\";\n\n// Grab the original event type straight from the Webhook trigger\nconst webhookData = $('Webhook').first().json;\nconst eventType = webhookData.body?.event || webhookData.event;\n\n// KILL THE DUPLICATE: If this execution run was triggered by 'conversation_created', \n// stop it right here so it never passes an item to the final HTTP Request node.\nif (eventType === 'conversation_created') {\n    return []; // Returning an empty array completely stops the workflow path dead\n}\n\nreturn [{\n    json: {\n        answer: answer.replace(/\\\\n/g, '\\n')\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        -80
+      ],
+      "id": "0eeda222-0d4a-4a95-98eb-81059a958561",
+      "name": "Code in JavaScript3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://chat.billjohnston.info/api/v1/accounts/{{ $('Webhook').first().json.body?.account?.id || $('Webhook').first().json.body?.account_id || 1 }}/conversations/{{ $('Webhook').first().json.body?.conversation?.id || $('Webhook').first().json.body?.conversation_id || $('Webhook').first().json.body?.id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.answer }}"
+            },
+            {
+              "name": "message_type",
+              "value": "outgoing"
+            },
+            {
+              "name": "private",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        464,
+        288
+      ],
+      "id": "0f05e2c1-06ff-404c-8512-2a89abd128c8",
+      "name": "HTTP Request3",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YumXW6Mb62MK6Ruf",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        656,
+        64
+      ],
+      "id": "52049095-1603-4502-86ea-49848ab55429",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -432,
+        224
+      ],
+      "id": "39e3f35d-94be-4741-83fe-fc33b8a3f0f5",
+      "name": "Wait",
+      "webhookId": "732b5bf2-0468-4f07-9054-44600a9c59f0"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript3": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "94734b6bcdfbeb61ce13d53b8382622ac58d1baeb9424efd958500782c04cc7e"
+  }
+}
